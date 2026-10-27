@@ -1,7 +1,7 @@
 // HTTPサーバーを使うための準備です。
 import com.sun.net.httpserver.HttpServer;
-// 追加: 読み書きで起きる入出力エラーを表すための準備です。
 import java.io.IOException;
+// 追加: 読み書きで起きる入出力エラーを表すための準備です。
 // ポート番号（通信の出入口番号）を指定するための準備です。
 import java.net.InetSocketAddress;
 // 追加: URLで送られた日本語を元の文字に戻すための準備です。
@@ -9,9 +9,13 @@ import java.net.URLDecoder;
 // 追加: UTF-8（日本語を正しく扱う文字コード）を使うための準備です。
 import java.nio.charset.StandardCharsets;
 // 追加: todos.csv を読み書きするための準備です。
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
+// ★変更: SQLiteへ接続してSQLを実行するための準備です。
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Statement;
 // 追加: Todoの一覧を扱うListを使うための準備です。
 import java.util.ArrayList;
 // 追加: Todoの一覧を扱うListを使うための準備です。
@@ -25,12 +29,14 @@ public class App {
     static int nextId = 1;
     // 追加: お買い物に使える予算です。
     static int budget = 5000;
-    // 追加: Todoの保存先ファイルです。
-    static final Path TODO_FILE = Paths.get("todos.csv");
+    // ★変更: SQLiteデータベースの接続先です。
+    static final String DB_URL = "jdbc:sqlite:todos.db";
 
     // プログラムを開始する場所です。
     public static void main(String[] args) throws Exception {
-        // 追加: 起動時に保存済みのTodoと予算を読み込みます。
+        // ★変更: 起動時にSQLiteの表を用意します。
+        initializeDatabase();
+        // ★変更: 起動時にSQLiteからTodoと予算を読み込みます。
         load();
         // 8080番ポートで待ち受けるWebサーバーを用意します。
         HttpServer server = HttpServer.create(new InetSocketAddress(8080), 0);
@@ -53,11 +59,12 @@ public class App {
                 // 追加: 空でないTodoだけを一覧に加えます。
                 if (!title.isEmpty()) {
                     // 変更: 新規登録時の金額は0円にします。
-                    todos.add(new Todo(nextId, title, 0));
+                    Todo todo = new Todo(nextId, title, 0);
+                    todos.add(todo);
+                    // ★変更: 追加した商品をINSERTでSQLiteへ保存します。
+                    insertTodo(todo);
                     nextId++;
                 }
-                // 追加: 商品を追加したあとの一覧をファイルへ保存します。
-                save();
                 // 追加: 一覧のあるトップページへ戻す場所を指定します。
                 exchange.getResponseHeaders().set("Location", "/");
                 exchange.sendResponseHeaders(303, -1);
@@ -74,8 +81,8 @@ public class App {
                     }
                 } catch (NumberFormatException e) {
                 }
-                // 追加: 予算を変更したあとの内容をファイルへ保存します。
-                save();
+                // ★変更: 変更した予算をSQLiteへ保存します。
+                saveBudget();
                 // 追加: 予算を設定したあと、一覧のあるトップページへ戻ります。
                 exchange.getResponseHeaders().set("Location", "/");
                 exchange.sendResponseHeaders(303, -1);
@@ -95,6 +102,8 @@ public class App {
                                     // 変更: 入力した金額を保存して、購入済みにします。
                                     todo.setPrice(price);
                                     todo.setDone(true);
+                                    // ★変更: 購入状態と金額をUPDATEでSQLiteへ保存します。
+                                    updateTodo(todo);
                                     break;
                                 }
                             }
@@ -102,8 +111,6 @@ public class App {
                     } catch (NumberFormatException e) {
                     }
                 }
-                // 追加: 購入状態と金額を変更したあとの一覧をファイルへ保存します。
-                save();
                 // ★追加: 一覧のあるトップページへ戻します。
                 exchange.getResponseHeaders().set("Location", "/");
                 exchange.sendResponseHeaders(303, -1);
@@ -119,14 +126,14 @@ public class App {
                             if (todo.getId() == id) {
                                 // 追加: 見つけた商品を未購入に戻します。
                                 todo.setDone(false);
+                                // ★変更: 購入取消をUPDATEでSQLiteへ保存します。
+                                updateTodo(todo);
                                 break;
                             }
                         }
                     } catch (NumberFormatException e) {
                     }
                 }
-                // 追加: 購入を取り消したあとの一覧をファイルへ保存します。
-                save();
                 // 追加: 一覧のあるトップページへ戻します。
                 exchange.getResponseHeaders().set("Location", "/");
                 exchange.sendResponseHeaders(303, -1);
@@ -140,11 +147,11 @@ public class App {
                         // ★追加: idを数字に変えて、同じ番号のTodoを削除します。
                         int id = Integer.parseInt(query.substring(3));
                         todos.removeIf(todo -> todo.getId() == id);
+                        // ★変更: 削除した商品をDELETEでSQLiteから削除します。
+                        deleteTodo(id);
                     } catch (NumberFormatException e) {
                     }
                 }
-                // 追加: 商品を削除したあとの一覧をファイルへ保存します。
-                save();
                 // ★追加: 一覧のあるトップページへ戻します。
                 exchange.getResponseHeaders().set("Location", "/");
                 exchange.sendResponseHeaders(303, -1);
@@ -212,50 +219,30 @@ public class App {
         System.out.println("サーバー起動: http://localhost:8080 （止めるときは Ctrl+C）");
     }
 
-// 追加: 現在の予算とTodo一覧をUTF-8のtodos.csvへ保存します。
-static void save() throws IOException {
-    // 追加: ファイルへ書き出す行を用意します。
-    List<String> lines = new ArrayList<>();
-    // 追加: 予算は先頭行へ保存します。
-    lines.add("budget," + budget);
-    // 追加: Todoを1件ずつCSVの行にします。
-    for (Todo todo : todos) {
-        lines.add(todo.getId() + "," + (todo.isDone() ? "1" : "0") + "," + todo.getTitle() + "," + todo.getPrice());
-    }
-    // 追加: すべての行をUTF-8で保存します。
-    Files.write(TODO_FILE, lines, StandardCharsets.UTF_8);
-}
-
-// 追加: todos.csvがあれば、予算とTodo一覧を起動時に読み込みます。
-static void load() throws IOException {
-    // 追加: 保存ファイルがなければ空の一覧のまま起動します。
-    if (!Files.exists(TODO_FILE)) {
-        return;
-    }
-    // 追加: UTF-8で保存された行を1行ずつ読み込みます。
-    for (String line : Files.readAllLines(TODO_FILE, StandardCharsets.UTF_8)) {
-        if (line.startsWith("budget,")) {
-            // 追加: 先頭行の予算を復元します。
-            budget = Integer.parseInt(line.substring(7));
-        } else {
-            // 追加: Todoのid・購入状態・商品名・金額を取り出します。
-            int firstComma = line.indexOf(',');
-            int secondComma = line.indexOf(',', firstComma + 1);
-            int lastComma = line.lastIndexOf(',');
-            int id = Integer.parseInt(line.substring(0, firstComma));
-            boolean done = line.substring(firstComma + 1, secondComma).equals("1");
-            String title = lastComma > secondComma ? line.substring(secondComma + 1, lastComma) : line.substring(secondComma + 1);
-            int price = lastComma > secondComma ? Integer.parseInt(line.substring(lastComma + 1)) : 0;
-            Todo todo = new Todo(id, title, price);
-            todo.setDone(done);
-            todos.add(todo);
-            // 追加: 読み込んだ最大idの次を、新しい商品の番号にします。
-            if (id >= nextId) {
-                nextId = id + 1;
-            }
-        }
+// ★変更: SQLiteの表を作成します。
+static void initializeDatabase() throws SQLException {
+    try (Connection c = DriverManager.getConnection(DB_URL); Statement s = c.createStatement()) {
+        s.executeUpdate("CREATE TABLE IF NOT EXISTS todos (id INTEGER PRIMARY KEY, title TEXT, done INTEGER, price INTEGER)");
+        s.executeUpdate("CREATE TABLE IF NOT EXISTS settings (name TEXT PRIMARY KEY, value INTEGER)");
+        s.executeUpdate("INSERT OR IGNORE INTO settings VALUES ('budget', 5000)");
     }
 }
+// ★変更: SELECTでTodoと予算を復元します。
+static void load() throws SQLException {
+    todos.clear(); nextId = 1;
+    try (Connection c = DriverManager.getConnection(DB_URL); Statement s = c.createStatement(); ResultSet r = s.executeQuery("SELECT id,title,done,price FROM todos ORDER BY id")) {
+        while (r.next()) { Todo t = new Todo(r.getInt(1), r.getString(2), r.getInt(4)); t.setDone(r.getInt(3) == 1); todos.add(t); nextId = Math.max(nextId, t.getId() + 1); }
+        try (ResultSet b = s.executeQuery("SELECT value FROM settings WHERE name='budget'")) { if (b.next()) budget = b.getInt(1); }
+    }
+}
+// ★変更: INSERTをPreparedStatementで実行します。
+static void insertTodo(Todo t) throws IOException { try (Connection c = DriverManager.getConnection(DB_URL); PreparedStatement p = c.prepareStatement("INSERT INTO todos VALUES (?,?,?,?)")) { p.setInt(1,t.getId()); p.setString(2,t.getTitle()); p.setInt(3,t.isDone()?1:0); p.setInt(4,t.getPrice()); p.executeUpdate(); } catch (SQLException e) { throw new IOException(e); } }
+// ★変更: UPDATEをPreparedStatementで実行します。
+static void updateTodo(Todo t) throws IOException { try (Connection c = DriverManager.getConnection(DB_URL); PreparedStatement p = c.prepareStatement("UPDATE todos SET done=?, price=? WHERE id=?")) { p.setInt(1,t.isDone()?1:0); p.setInt(2,t.getPrice()); p.setInt(3,t.getId()); p.executeUpdate(); } catch (SQLException e) { throw new IOException(e); } }
+// ★変更: DELETEをPreparedStatementで実行します。
+static void deleteTodo(int id) throws IOException { try (Connection c = DriverManager.getConnection(DB_URL); PreparedStatement p = c.prepareStatement("DELETE FROM todos WHERE id=?")) { p.setInt(1,id); p.executeUpdate(); } catch (SQLException e) { throw new IOException(e); } }
+// ★変更: 予算をSQLiteへ保存します。
+static void saveBudget() throws IOException { try (Connection c = DriverManager.getConnection(DB_URL); PreparedStatement p = c.prepareStatement("UPDATE settings SET value=? WHERE name='budget'")) { p.setInt(1,budget); p.executeUpdate(); } catch (SQLException e) { throw new IOException(e); } }
 
 }
 
