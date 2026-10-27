@@ -1,11 +1,17 @@
 // HTTPサーバーを使うための準備です。
 import com.sun.net.httpserver.HttpServer;
+// 追加: 読み書きで起きる入出力エラーを表すための準備です。
+import java.io.IOException;
 // ポート番号（通信の出入口番号）を指定するための準備です。
 import java.net.InetSocketAddress;
 // 追加: URLで送られた日本語を元の文字に戻すための準備です。
 import java.net.URLDecoder;
 // 追加: UTF-8（日本語を正しく扱う文字コード）を使うための準備です。
 import java.nio.charset.StandardCharsets;
+// 追加: todos.csv を読み書きするための準備です。
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 // 追加: Todoの一覧を扱うListを使うための準備です。
 import java.util.ArrayList;
 // 追加: Todoの一覧を扱うListを使うための準備です。
@@ -19,17 +25,15 @@ public class App {
     static int nextId = 1;
     // 追加: お買い物に使える予算です。
     static int budget = 5000;
+    // 追加: Todoの保存先ファイルです。
+    static final Path TODO_FILE = Paths.get("todos.csv");
 
     // プログラムを開始する場所です。
     public static void main(String[] args) throws Exception {
+        // 追加: 起動時に保存済みのTodoと予算を読み込みます。
+        load();
         // 8080番ポートで待ち受けるWebサーバーを用意します。
         HttpServer server = HttpServer.create(new InetSocketAddress(8080), 0);
-        // ★変更: 起動時に表示する1件目のサンプルTodoです。
-        todos.add(new Todo(nextId++, "牛乳を買う", 220));
-        // ★変更: 起動時に表示する2件目のサンプルTodoです。
-        Todo egg = new Todo(nextId++, "卵を買う", 300);
-        egg.setDone(true);
-        todos.add(egg);
         // 「/」へのアクセスに返事をする処理を直接書きます。
         server.createContext("/", exchange -> {
             // ブラウザへ返す文字です。
@@ -52,6 +56,8 @@ public class App {
                     todos.add(new Todo(nextId, title, 0));
                     nextId++;
                 }
+                // 追加: 商品を追加したあとの一覧をファイルへ保存します。
+                save();
                 // 追加: 一覧のあるトップページへ戻す場所を指定します。
                 exchange.getResponseHeaders().set("Location", "/");
                 exchange.sendResponseHeaders(303, -1);
@@ -68,6 +74,8 @@ public class App {
                     }
                 } catch (NumberFormatException e) {
                 }
+                // 追加: 予算を変更したあとの内容をファイルへ保存します。
+                save();
                 // 追加: 予算を設定したあと、一覧のあるトップページへ戻ります。
                 exchange.getResponseHeaders().set("Location", "/");
                 exchange.sendResponseHeaders(303, -1);
@@ -94,6 +102,8 @@ public class App {
                     } catch (NumberFormatException e) {
                     }
                 }
+                // 追加: 購入状態と金額を変更したあとの一覧をファイルへ保存します。
+                save();
                 // ★追加: 一覧のあるトップページへ戻します。
                 exchange.getResponseHeaders().set("Location", "/");
                 exchange.sendResponseHeaders(303, -1);
@@ -115,6 +125,8 @@ public class App {
                     } catch (NumberFormatException e) {
                     }
                 }
+                // 追加: 購入を取り消したあとの一覧をファイルへ保存します。
+                save();
                 // 追加: 一覧のあるトップページへ戻します。
                 exchange.getResponseHeaders().set("Location", "/");
                 exchange.sendResponseHeaders(303, -1);
@@ -131,6 +143,8 @@ public class App {
                     } catch (NumberFormatException e) {
                     }
                 }
+                // 追加: 商品を削除したあとの一覧をファイルへ保存します。
+                save();
                 // ★追加: 一覧のあるトップページへ戻します。
                 exchange.getResponseHeaders().set("Location", "/");
                 exchange.sendResponseHeaders(303, -1);
@@ -197,6 +211,52 @@ public class App {
         server.start();
         System.out.println("サーバー起動: http://localhost:8080 （止めるときは Ctrl+C）");
     }
+
+// 追加: 現在の予算とTodo一覧をUTF-8のtodos.csvへ保存します。
+static void save() throws IOException {
+    // 追加: ファイルへ書き出す行を用意します。
+    List<String> lines = new ArrayList<>();
+    // 追加: 予算は先頭行へ保存します。
+    lines.add("budget," + budget);
+    // 追加: Todoを1件ずつCSVの行にします。
+    for (Todo todo : todos) {
+        lines.add(todo.getId() + "," + (todo.isDone() ? "1" : "0") + "," + todo.getTitle() + "," + todo.getPrice());
+    }
+    // 追加: すべての行をUTF-8で保存します。
+    Files.write(TODO_FILE, lines, StandardCharsets.UTF_8);
+}
+
+// 追加: todos.csvがあれば、予算とTodo一覧を起動時に読み込みます。
+static void load() throws IOException {
+    // 追加: 保存ファイルがなければ空の一覧のまま起動します。
+    if (!Files.exists(TODO_FILE)) {
+        return;
+    }
+    // 追加: UTF-8で保存された行を1行ずつ読み込みます。
+    for (String line : Files.readAllLines(TODO_FILE, StandardCharsets.UTF_8)) {
+        if (line.startsWith("budget,")) {
+            // 追加: 先頭行の予算を復元します。
+            budget = Integer.parseInt(line.substring(7));
+        } else {
+            // 追加: Todoのid・購入状態・商品名・金額を取り出します。
+            int firstComma = line.indexOf(',');
+            int secondComma = line.indexOf(',', firstComma + 1);
+            int lastComma = line.lastIndexOf(',');
+            int id = Integer.parseInt(line.substring(0, firstComma));
+            boolean done = line.substring(firstComma + 1, secondComma).equals("1");
+            String title = lastComma > secondComma ? line.substring(secondComma + 1, lastComma) : line.substring(secondComma + 1);
+            int price = lastComma > secondComma ? Integer.parseInt(line.substring(lastComma + 1)) : 0;
+            Todo todo = new Todo(id, title, price);
+            todo.setDone(done);
+            todos.add(todo);
+            // 追加: 読み込んだ最大idの次を、新しい商品の番号にします。
+            if (id >= nextId) {
+                nextId = id + 1;
+            }
+        }
+    }
+}
+
 }
 
 // ★変更: 1件のTodoの番号・内容・完了状態をまとめるクラスです。
