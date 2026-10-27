@@ -214,6 +214,33 @@ public class App {
             // 通信を閉じます。
             exchange.getResponseBody().close();
         });
+        // 追加: SQLiteに保存された全TodoをJSONで返す入口です。
+        server.createContext("/api/todos", exchange -> {
+            StringBuilder json = new StringBuilder("[");
+            try (Connection connection = DriverManager.getConnection(DB_URL);
+                 PreparedStatement statement = connection.prepareStatement("SELECT id, title, done, price FROM todos ORDER BY id");
+                 ResultSet result = statement.executeQuery()) {
+                boolean first = true;
+                while (result.next()) {
+                    if (!first) {
+                        json.append(",");
+                    }
+                    json.append("{\"id\":").append(result.getInt("id"));
+                    json.append(",\"title\":\"").append(escapeJson(result.getString("title"))).append("\"");
+                    json.append(",\"done\":").append(result.getInt("done") == 1);
+                    json.append(",\"price\":").append(result.getInt("price")).append("}");
+                    first = false;
+                }
+            } catch (SQLException e) {
+                throw new IOException(e);
+            }
+            json.append("]");
+            byte[] body = json.toString().getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().set("Content-Type", "application/json");
+            exchange.sendResponseHeaders(200, body.length);
+            exchange.getResponseBody().write(body);
+            exchange.getResponseBody().close();
+        });
         // サーバーを起動します。
         server.start();
         System.out.println("サーバー起動: http://localhost:8080 （止めるときは Ctrl+C）");
@@ -243,6 +270,30 @@ static void updateTodo(Todo t) throws IOException { try (Connection c = DriverMa
 static void deleteTodo(int id) throws IOException { try (Connection c = DriverManager.getConnection(DB_URL); PreparedStatement p = c.prepareStatement("DELETE FROM todos WHERE id=?")) { p.setInt(1,id); p.executeUpdate(); } catch (SQLException e) { throw new IOException(e); } }
 // ★変更: 予算をSQLiteへ保存します。
 static void saveBudget() throws IOException { try (Connection c = DriverManager.getConnection(DB_URL); PreparedStatement p = c.prepareStatement("UPDATE settings SET value=? WHERE name='budget'")) { p.setInt(1,budget); p.executeUpdate(); } catch (SQLException e) { throw new IOException(e); } }
+
+// 追加: JSONの文字列として安全な形へ特殊文字を変換します。
+static String escapeJson(String text) {
+    StringBuilder escaped = new StringBuilder();
+    for (int i = 0; i < text.length(); i++) {
+        char character = text.charAt(i);
+        switch (character) {
+            case '"': escaped.append("\\\""); break;
+            case '\\': escaped.append("\\\\"); break;
+            case '\n': escaped.append("\\n"); break;
+            case '\r': escaped.append("\\r"); break;
+            case '\t': escaped.append("\\t"); break;
+            case '\b': escaped.append("\\b"); break;
+            case '\f': escaped.append("\\f"); break;
+            default:
+                if (character < 0x20) {
+                    escaped.append(String.format("\\u%04x", (int) character));
+                } else {
+                    escaped.append(character);
+                }
+        }
+    }
+    return escaped.toString();
+}
 
 }
 
